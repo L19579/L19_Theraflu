@@ -1,0 +1,261 @@
+# This tokens arr can be modified if more routes are needed. Tokens can be pulled from jupiter api as an alt.
+
+[user]
+pubkey = "" <-------- user public key. REQUIRED!
+keypair_path = "" <-------- Path to your keypair.json. REQUIRED!
+
+[route_preferences]
+random_route_with_settlement_at_ends = true
+maximum_jupiter_hops = 2
+max_slippage = 0.09
+max_usdc_per_trade = 4000000
+
+# [[preferred_route]]
+# route = ["usd", "usdt", "usdc"] // Disabled for now.
+   
+[[tokens]]
+name = "wrappped sol"
+symbol = "SOL" #instead of wSOL for jupiter
+mint_key = "So11111111111111111111111111111111111111112"
+unit_decimals = 9
+settlement = false 
+
+[[tokens]]
+name = "usd coin"
+symbol = "USDC"
+mint_key = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+token_account_key = "" <-------- tokey account public key. Required. `settlement` must = true.
+unit_decimals = 6
+settlement = true 
+
+[[tokens]]
+name = "usd tether"
+symbol = "USDT" 
+mint_key = "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB"
+token_account_key = "" <-------- tokey account public key. Optional, settlement must  = false if empty.
+unit_decimals = 6
+settlement = false 
+  
+[[tokens]]
+name = "crystal"
+symbol = "CRY"
+mint_key = "HbrmyoumgcK6sDFBi6EZQDi4i4ZgoN16eRB2JseKc7Hi"
+token_account_key = "" <-------- tokey account public key. Optional, settlement must  = false if empty.
+unit_decimals = 9
+settlement = false 
+ 
+[[tokens]]
+name = "bonfida"
+symbol = "FIDA"
+mint_key = "EchesyfXePKdLtoiZSL8pBe8Myagyy8ZRqsACNCFGnvp"
+token_account_key = "" <-------- tokey account public key. Optional, settlement must  = false if empty.
+unit_decimals =  6
+settlement = false 
+
+[[tokens]]
+name = "step"
+symbol = "STEP"
+mint_key = "StepAscQoEioFxxWGnh2sLBDFp9d8rvKz2Yp39iDpyT"
+token_account_key = "" <-------- tokey account public key. Optional, settlement must  = false if empty.
+unit_decimals = 9
+settlement = false 
+ 
+[[tokens]]
+name = "1sol"
+symbol = "1SOL"
+mint_key = "4ThReWAbAVZjNVgs5Ui9Pk3cZ5TYaD9u6Y89fp6EFzoF"
+token_account_key = "" <-------- tokey account public key. Optional, settlement must  = false if empty.
+unit_decimals = 8
+settlement = false 
+
+[[tokens]]
+name = "raydium"
+symbol = "RAY"
+mint_key = "4k3Dyjzvzp8eMZWUXbBCjEvwSkkk59S5iCNLY3QrkX6R"
+token_account_key = "" <-------- tokey account public key. Optional, settlement must  = false if empty.
+unit_decimals = 6
+settlement = false 
+
+[[tokens]]
+name = "avax" #Wormhole Portabl bridge
+symbol = "AVAX"
+mint_key = "KgV1GvrHQmRBY8sHQQeUKwTm2r2h8t4C8qt12Cw1HVE"
+token_account_key = "" <-------- tokey account public key. Optional, settlement must  = false if empty.
+unit_decimals = 8
+settlement = false 
+
+[[tokens]]
+name = "samoyed coin"
+symbol = "SAMO"
+mint_key = "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU"
+token_account_key = "" <-------- tokey account public key. Optional, settlement must  = false if empty.
+unit_decimals = 9
+settlement = false 
+
+[[tokens]]
+name = "cropper finance"
+symbol = "CRP"
+mint_key = "DubwWZNWiNGMMeeQHPnMATNj77YZPZSAz2WVR5WjLJqz"
+token_account_key = "" <-------- tokey account public key. Optional, settlement must  = false if empty.
+unit_decimals = 9
+settlement = false 
+
+[[tokens]]
+name = "mongoose coin"
+symbol = "MONGOOSE"
+mint_key = "J7WYVzFNynk9D28eBCccw2EYkygygiLDCVCabV7CupWL"
+token_account_key = "" <-------- tokey account public key. Optional, settlement must  = false if empty.
+unit_decimals = 9  
+settlement = false 
+
+[[tokens]]
+name = "aurory"
+symbol = "AURY"
+mint_key = "AURYydfxJib1ZkTir1Jn1J9ECYUtjb6rKQVmtYaixWPP"
+token_account_key = "" <-------- tokey account public key. Optional, settlement must  = false if empty.
+unit_decimals = 9
+settlement = false 
+
+[[tokens]]
+name = "FUMoney" 
+symbol = "FUM" 
+mint_key = "EZF2sPJRe26e8iyXaCrmEefrGVBkqqNGv9UPGG9EnTQz"
+token_account_key = "" <-------- tokey account public key. Optional, settlement must  = false if empty.
+unit_decimals = 9 
+settlement = false 
+
+[[tokens]]
+name = "orca"
+symbol = "ORCA"
+mint_key = "orcaEKTdK7LKz57vaAYr9QeNsVEPfiu6QeMU1kektZE"
+token_account_key = "" <-------- tokey account public key. Optional, settlement must  = false if empty.
+unit_decimals = 6
+settlement = false 
+
+[[tokens]]
+name = "ftt" # wrapped sollet bridge
+symbol = "FTT"
+mint_key = "AGFEad2et2ZJif9jaGpdMixQqvW5i81aBdvKe7PHNfz3"
+token_account_key = "" <-------- tokey account public key. Optional, settlement must  = false if empty.
+unit_decimals = 6
+settlement = false 
+
+[[tokens]]
+name = "ether"
+symbol = "ETH"
+mint_key = "7vfCXTUXx5WJV5JADk17DUJ4ksgau7utNKj4b963voxs"
+token_account_key = "" <-------- tokey account public key. Optional, settlement must  = false if empty.
+unit_decimals = 8
+settlement = false 
+
+[[tokens]]
+name = "solape tokens"
+symbol = "SOLAPE"
+mint_key = "GHvFFSZ9BctWsEc5nujR1MTmmJWY7tgQz2AXE6WVFtGN"
+token_account_key = "" <-------- tokey account public key. Optional, settlement must  = false if empty.
+unit_decimals = 9
+settlement = false 
+
+[[tokens]]
+name = "dinoegg"
+symbol = "DINOEGG"
+mint_key = "2TxM6S3ZozrBHZGHEPh9CtM74a9SVXbr7NQ7UxkRvQij"
+token_account_key = "" <-------- tokey account public key. Optional, settlement must  = false if empty.
+unit_decimals = 6 
+settlement = false 
+
+[[tokens]]
+name = "acacia"
+symbol = "ACA"
+mint_key = "8BLiujyxu5gJajWBXoZQkwSsamdeHNKWQbu1ApAao8Ps"
+token_account_key = "" <-------- tokey account public key. Optional, settlement must  = false if empty.
+unit_decimals = 6 
+settlement = false 
+
+[[tokens]]
+name = "sunny"
+symbol = "SUNNY"
+mint_key = "SUNNYWgPQmFxe9wTZzNK7iPnJ3vYDrkgnxJRJm1s3ag"
+token_account_key = "" <-------- tokey account public key. Optional, settlement must  = false if empty.
+unit_decimals = 6 
+settlement = false 
+
+[[tokens]]
+name = "nirvana"
+symbol = "NIRV"
+mint_key = "NRVwhjBQiUPYtfDT5zRBVJajzFQHaBUNtC7SNVvqRFa"
+token_account_key = "" <-------- tokey account public key. Optional, settlement must  = false if empty.
+unit_decimals = 6 
+settlement = false 
+
+[[tokens]]
+name = "saber"
+symbol = "SBR"
+mint_key = "Saber2gLauYim4Mvftnrasomsv6NvAuncvMEZwcLpD1"
+token_account_key = "" <-------- tokey account public key. Optional, settlement must  = false if empty.
+unit_decimals = 6 
+settlement = false 
+
+[[tokens]]
+name = "synex coin"
+symbol = "MINECRAFT"
+mint_key = "FTkj421DxbS1wajE74J34BJ5a1o9ccA97PkK6mYq9hNQ"
+token_account_key = "" <-------- tokey account public key. Optional, settlement must  = false if empty.
+unit_decimals = 9 
+settlement = false 
+
+[[tokens]]
+name = "msol"
+symbol = "mSOL"
+mint_key = "mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So"
+token_account_key = "" <-------- tokey account public key. Optional, settlement must  = false if empty.
+unit_decimals = 9 
+settlement = false 
+
+[[tokens]]
+name = "solanium"
+symbol = "SLIM"
+mint_key = "xxxxa1sKNGwFtw2kFn8XauW9xq8hBZ5kVtcSesTT9fW"
+token_account_key = "" <-------- tokey account public key. Optional, settlement must  = false if empty.
+unit_decimals = 6 
+settlement = false 
+
+[[tokens]]
+name = "trippy leaf"
+symbol = "TRPY"
+mint_key = "Fse2oFDfbwT89CqtuoFaHCBnGTMFLartDYDjPLZyc7e"
+token_account_key = "" <-------- tokey account public key. Optional, settlement must  = false if empty.
+unit_decimals = 6 
+settlement = false 
+
+[[tokens]]
+name = "defi land"
+symbol = "DFL"
+mint_key = "DFL1zNkaGPWm1BqAVqRjCZvHmwTFrEaJtbzJWgseoNJh"
+token_account_key = "" <-------- tokey account public key. Optional, settlement must  = false if empty.
+unit_decimals = 9 
+settlement = false 
+
+[[tokens]]
+name = "star atlas dao"
+symbol = "POLIS"
+mint_key = "poLisWXnNRwC6oBu1vHiuKQzFjGL4XDSu4g9qjz9qVk"
+token_account_key = "" <-------- tokey account public key. Optional, settlement must  = false if empty.
+unit_decimals = 8 
+settlement = false 
+
+[[tokens]]
+name = "cope"
+symbol = "COPE"
+mint_key = "8HGyAAB1yoM1ttS7pXjHMa3dukTFGQggnFFH3hJZgzQh"
+token_account_key = "" <-------- tokey account public key. Optional, settlement must  = false if empty.
+unit_decimals = 6 
+settlement = false 
+
+[[tokens]]
+name = "liq"
+symbol = "LIQ"
+mint_key = "4wjPQJ6PrkC4dHhYghwJzGBVP78DkBzA2U3kHoFNBuhj"
+token_account_key = "" <-------- tokey account public key. Optional, settlement must  = false if empty.
+unit_decimals = 6 
+settlement = false 
