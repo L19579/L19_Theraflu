@@ -1,8 +1,5 @@
-// Impl control for token_accounts
-
 pub mod prelude;
 pub mod schemas;
-pub mod settings_processor;
 use { prelude::*, schemas::* };
 
 pub struct CruelSummer{
@@ -11,7 +8,7 @@ pub struct CruelSummer{
     pub arb_paths: Vec<ArbPath>,
 }
 
-impl<'ye> CruelSummer{
+impl CruelSummer{
     pub fn new(arb_options: ArbOptions) -> Result<Self>{
         let config = Self::load_config().unwrap();
         let arb_paths = Self::load_arb_paths(&config.tokens, &arb_options).unwrap();
@@ -27,7 +24,8 @@ impl<'ye> CruelSummer{
         // ^ above is useless atm.
         let lock_other_ops = Arc::new(Mutex::new(false));
         let active_tokens = Arc::new(Mutex::new(active_tokens));
-        let last_active_tx_quote: Arc<Mutex<Option<(QuoteData, u64)>>> = Arc::new(Mutex::new(None));
+        let last_active_tx_quote: Arc<Mutex<Option<(Token, u64)>>> = Arc::new(Mutex::new(None));
+        let failed_recovery_loop_count = Arc::new(Mutex::new(0u16));
 
         for arb_path in &self.arb_paths{
             thread::sleep(Duration::from_millis(rand::thread_rng().gen_range(700..3000))); // Staggered launches to keep within rate limits.
@@ -41,17 +39,20 @@ impl<'ye> CruelSummer{
                 let active_tokens = Arc::clone(&active_tokens);
                 let lock_others = Arc::clone(&lock_other_ops); // altered name for reachability. Refactor.
                 let last_active_tx_quote = Arc::clone(&last_active_tx_quote); // (last quote in a failed arb, initial in amount)
+                let failed_recovery_loop_count = Arc::clone(&failed_recovery_loop_count);
                 thread_handles.push(
                     thread::Builder::new().name(thread_name.clone()).spawn(move ||{
-                        loop{ // < -- Crash recovery. Refactor. 
+                        loop{
                             let config = config.clone();
                             let arb = arb.clone();
                             let user_cred = user_cred.gen_copy();
                             let active_tokens = Arc::clone(&active_tokens);
                             let lock_other_ops = Arc::clone(&lock_others);
                             let last_active_tx_quote = Arc::clone(&last_active_tx_quote);
+                            let failed_recovery_loop_count = Arc::clone(&failed_recovery_loop_count);
                             _ = panic::catch_unwind(move ||{
-                            Self::kanye_west(thread_counter, config, arb, user_cred, active_tokens, lock_other_ops, last_active_tx_quote)
+                            Self::kanye_west(thread_counter, config, arb, user_cred, active_tokens, lock_other_ops, last_active_tx_quote,
+                                failed_recovery_loop_count);
                             });
                             if recover_crashed_thread {
                                 let stmt = format!("Thread `{} - {}` crashed. Recovering in 10s", thread_counter, thread_name);
@@ -72,14 +73,14 @@ impl<'ye> CruelSummer{
     
     pub fn kanye_west(searcher_id: u8, config: Config, arb_path: ArbPath, 
         user_credentials: UserCredentials, active_tokens: Arc<Mutex<Vec<(Token, bool)>>>,
-        lock_other_ops: Arc<Mutex<bool>>, last_active_tx_quote: Arc<Mutex<Option<(QuoteData, u64)>>>){
+        lock_other_ops: Arc<Mutex<bool>>, last_active_tx_quote: Arc<Mutex<Option<(Token, u64)>>>,
+        failed_recovery_loop_count: Arc<Mutex<u16>>){
         show_statement(StatementType::ThreadOnline, &format!("{:<15} Searcher at work.", 
             thread::current().name().unwrap_or("Unamed thread")));
         let rpc_client = RpcClient::new(RPC_CLIENT_LINK);
         let in_token = arb_path.path[0].0.clone();
         let out_token = arb_path.path.last().unwrap().1.clone();
         let max_usdc_per_trade = config.route_preferences.max_usdc_per_trade;
-        //println!("TRACE ---------------------------------------- kanye_west() --- 111");
         'main_loop: loop{
             if *lock_other_ops.lock().unwrap() { continue };
             let maximum_in_amount = match Self::approx_token_price(None, &arb_path.path[0].0, 
@@ -94,14 +95,53 @@ impl<'ye> CruelSummer{
             let mut quotes = Vec::<JupiterQuote>::new();
             let mut best_quote_data = Vec::<QuoteData>::new();
             let date_time = Utc::now();
-            //if Self::token_is_locked(&active_tokens, &in_token){ continue };
-            if Self::token_account_balance(&rpc_client, &in_token).unwrap() < maximum_in_amount{ // <--------------------- Blocks non USDC starts, Fix!
+            let token_account_balance = match Self::token_account_balance(&rpc_client, &in_token){
+                Ok(b)  => b,
+                _ => {
+                    continue 'main_loop
+                },
+            };
+            
+            if *failed_recovery_loop_count.lock().unwrap() > 4 {
+                show_statement(StatementType::General, "Helping another bot recover. Checking and transfering from all active token accounts."); 
+                *lock_other_ops.lock().unwrap() = true;
+                for token in &*active_tokens.lock().unwrap(){
+                    println!("\tchecking {} token account", token.0.symbol);
+                    if token.0.mint_key.to_lowercase() == USDC_MINT_KEY.to_lowercase(){
+                        continue;
+                    }
+                    let token_acc_balance = match Self::token_account_balance(&rpc_client, &token.0){
+                        Ok(b) => b,
+                        _ => continue,
+                    };  
+                    let token_usdc_price = match Self::approx_usdc_price(Some(&token.0), token_acc_balance){ 
+                        Ok(p) => p,
+                        _ => continue,
+                    };  
+                    if (token_usdc_price as f64/max_usdc_per_trade as f64) > 0.93f64{
+                        let _ = Self::send_from_token_to_usdc_account(&config, &user_credentials, 
+                            &token.0, Some(token_acc_balance));
+                    }  
+                } 
+                *failed_recovery_loop_count.lock().unwrap() = 0;
+                *lock_other_ops.lock().unwrap() = false;
+                thread::sleep(Duration::from_secs(10));  
+                continue 'main_loop;
+            } 
+            
+            if token_account_balance < maximum_in_amount{ // Blocks non USDC starts.
+                if last_active_tx_quote.lock().unwrap().is_none(){
+                    show_statement(StatementType::General, "last_active_tx_quote is empty. Recovered coins likely unsettled. Pausing for 15s."); 
+                    thread::sleep(Duration::from_secs(15));  
+                    *failed_recovery_loop_count.lock().unwrap() += 1;
+                    continue;
+                }
                 let result: Result<()>;
                 match &*last_active_tx_quote.lock().unwrap()
                 {
                     Some(q) => result = {
                         *lock_other_ops.lock().unwrap() = true;
-                        let r = Self::recover_last_tx(&user_credentials, q.0.clone(), q.1);
+                        let r = Self::send_from_token_to_usdc_account(&config, &user_credentials, &q.0, Some(q.1));
                         *lock_other_ops.lock().unwrap() = false;
                         r
                     }, // < - This loop continues forever. Impl hard kill after x recovery attempts.
@@ -117,6 +157,32 @@ impl<'ye> CruelSummer{
                 show_statement(StatementType::Warning, &stmt);
                 continue;
             };
+
+            if last_active_tx_quote.lock().unwrap().is_some() {
+                let last_tx_token_acc_balance = match Self::token_account_balance(&rpc_client, &in_token){
+                    Ok(b)  => b,
+                    _ => {
+                        continue 'main_loop
+                    },
+                };
+                let q = match last_active_tx_quote.lock().unwrap().as_ref(){
+                    Some(q) => q.clone(),
+                    None => continue 'main_loop, // unlocked @ if checker. This applies to everything else tho. Review.
+                };
+
+                if last_active_tx_quote.lock().unwrap().as_ref().unwrap().1 >= last_tx_token_acc_balance{
+                    *lock_other_ops.lock().unwrap() = true;
+                    //let r = Self::recover_last_tx(&user_credentials, q.0.clone(), q.1);
+                    let result = Self::send_from_token_to_usdc_account(&config, &user_credentials, &q.0, Some(q.1));
+                    *lock_other_ops.lock().unwrap() = false;
+                    
+                    match result {
+                        Ok(()) => { *last_active_tx_quote.lock().unwrap() = None; }
+                        _ => (),
+                    };
+                }
+            }
+
             quotes.push( match Self::get_quote(&in_token.mint_key, &arb_path.path[0].1.mint_key, maximum_in_amount){
                 Ok(q) => q,
                 _ => continue 'main_loop,
@@ -131,7 +197,6 @@ impl<'ye> CruelSummer{
             }
             best_quote_data.push(Self::best_quote(&quotes.last().unwrap()));
             let final_out_amount = best_quote_data.last().unwrap().outAmountWithSlippage;
-            //let mut in_amounts = vec![maximum_in_amount].append(&mut best_quote_data.iter().map(|q| q.outAmount).collect::<Vec<u64>>());
             let arb_in_tokens: Vec<&Token> = arb_path.path.iter().map(|p| &p.0).collect();
             let in_amounts: Vec<u64> = best_quote_data.iter().map(|q| q.inAmount).collect();
             let approx_fees_in_usdc = match Self::load_max_fees_as_usdc(&(arb_in_tokens.into_iter().zip(in_amounts.into_iter())
@@ -147,10 +212,8 @@ impl<'ye> CruelSummer{
                 maximum_in_amount, in_token.symbol, final_out_amount, out_token.symbol, approx_fees_in_usdc, pnl);
             show_statement(StatementType::General, &format!("{} --- {}", thread::current().name().unwrap_or("Unamed thread"), statement));
             if pnl > 10000 { 
-                //continue; // <---------- TEMP
                 if *lock_other_ops.lock().unwrap(){ continue };
                 *lock_other_ops.lock().unwrap() = true;
-
 
                 let date_time = Utc::now();
                 let mut path_str_desc = String::new();
@@ -161,6 +224,8 @@ impl<'ye> CruelSummer{
                 }
                 let statement = format!("{} ; in_amount: {} {}, final_out_amount: {} {}; fee: {} USDC ; pnl {} USDC", date_time, 
                     maximum_in_amount, in_token.symbol, final_out_amount, out_token.symbol, approx_fees_in_usdc, pnl);
+                show_statement(StatementType::Opportunity, &format!("{} --- {}", thread::current().name().unwrap_or("Unamed thread"), statement));
+                //show_statement(StatementType::Opportunity, &statement);
                 let mut fetch_times_str: String = String::from("Fetch times: ");
                 fetch_times_str.push_str(&quotes.clone().into_iter().enumerate().map(|(i, q)| format!("\n\tquote #{}: {} seconds", i, q.timeTaken))
                     .collect::<Vec<String>>().join(" ")); 
@@ -168,11 +233,10 @@ impl<'ye> CruelSummer{
                 
                 for (i, quote) in quotes.into_iter().enumerate(){
                     println!("\tquote {}: {} ms", i+1, quote.timeTaken);
-                }
-                *last_active_tx_quote.lock().unwrap() = Some((best_quote_data.last().unwrap().clone(), maximum_in_amount));
-                let quote_data_sequence = QuoteDataSequence { quotes: best_quote_data, date_time };
-                //Self::capture(user_credentials.gen_copy(), quote_data_sequence); <---- capture() was slower but MUCH more reliable under bear market may reimplment.
-                _ = Self::capture_2(&user_credentials, quote_data_sequence, &in_token) ;
+                }                                                                              
+                *last_active_tx_quote.lock().unwrap() = Some((arb_path.path[1].0.clone(), best_quote_data.last().unwrap().inAmount));
+                let quote_data_sequence = QuoteDataSequence { quotes: best_quote_data, arb_path: arb_path.clone(), date_time };
+                _ = Self::capture_v3(&user_credentials, quote_data_sequence, &in_token);
                 thread::sleep(Duration::from_secs(10));
                 *lock_other_ops.lock().unwrap() = false;
                 continue;
@@ -193,9 +257,12 @@ impl<'ye> CruelSummer{
     }
 
     pub fn token_account_balance(rpc_client: &RpcClient, token: &Token) -> Result<u64>{
-        let  ui_amount = rpc_client.get_token_account_balance_with_commitment(
-            &b58_to_pubkey(&token.token_account_key.as_ref().unwrap()), CommitmentConfig::confirmed()).unwrap().value;
-        return Ok((ui_amount.ui_amount.unwrap() * 10f64.powi(ui_amount.decimals as i32))as u64);
+        let  ui_amount = match rpc_client.get_token_account_balance_with_commitment(
+            &b58_to_pubkey(&token.token_account_key.as_ref().unwrap()), CommitmentConfig::confirmed()){
+            Ok(p) => p,
+            Err(e) => return Err(anyhow!("{}", e)),
+        };
+        return Ok((ui_amount.value.ui_amount.unwrap() * 10f64.powi(ui_amount.value.decimals as i32))as u64);
     }
 
     pub fn non_dec_amount(token: &Token, amount: f64) -> u64{
@@ -203,7 +270,11 @@ impl<'ye> CruelSummer{
     }
 
     pub fn load_max_fees_as_usdc(t_and_a: &[(&Token, u64)]) -> Result<u64>{
-        let expected_tx_fee_per_leg = t_and_a.len() as u64 * Self::approx_usdc_price(None, 100 + 500).unwrap();  // 000_000_100 + 000_000_500 lamports
+        // 000_000_100 + 000_000_500 lamports
+        let expected_tx_fee_per_leg = t_and_a.len() as u64 * match Self::approx_usdc_price(None, 100 + 500){
+            Ok(f) => f,
+            Err(e) => return Err(anyhow!("{}", e)),
+        };  
 
         match panic::catch_unwind (|| {
             let jup_fees: u64 = t_and_a.iter().map(|(token, in_amount)| Self::approx_usdc_price(Some(&token), 
@@ -236,15 +307,9 @@ impl<'ye> CruelSummer{
                 let buf = hyper::body::to_bytes(response).await.unwrap();
                 let price_check = serde_json::from_slice::<PriceCheck>(&buf).unwrap(); 
                 let one_token_usdc_p = price_check.data.price * 10f64.powi(6);
-                //println!("TRACE --- price: {}", price_check.data.price);
-                //println!("usdc_one_token_usdc_p -- thread: {} : TRACE ----------------- 1 {} = {} USDC", 
-                //    thread::current().name().unwrap_or("unamed thread"), token.map_or("SOL", |t| &t.symbol), one_token_usdc_p);
                 (one_token_usdc_p * (token_amount as f64 / 10f64.powi(token
                     .map_or(9, |t| t.unit_decimals as i32)))) as u64 
             });
-            //println!("usdc_formatted_price -- thread: {} : TRACE ----------------- {} {} = {} USDC", 
-            //        thread::current().name().unwrap_or("unamed thread"), token_amount, 
-            //        token.map_or("Lamports", |t| &t.symbol), formatted_price);
             formatted_price
         }){
             Ok(formatted_price) => Ok(formatted_price),
@@ -275,13 +340,7 @@ impl<'ye> CruelSummer{
                 let price_check = serde_json::from_slice::<PriceCheck>(&buf).unwrap(); 
                 (price_check.data.price * input_t_amount as f64 
                  * 10f64.powi(output_t.unit_decimals as i32 - input_t.map_or(6, |t| t.unit_decimals) as i32)) as u64  
-            //println!("usdc_formatted_price -- thread: {} : TRACE ----------------- 1 {} = {} USDC", 
-            //    (price_check.data.price * 10f64.powi(3)) as u64 * 10u64.checked_pow(t_two.unit_decimals as u32 - 3).unwrap()
             });
-            //  let input_symbol = input_t.map_or("USDC", |t| &t.symbol);
-            //    println!("token_formatted_price -- thread: {} : TRACE ----------------- {} {} = {} {}",
-            //             thread::current().name().unwrap_or("Unamed thread"), input_t_amount, input_symbol,
-            //             formatted_price, output_t.symbol);
             formatted_price 
         }){
             Ok(formatted_price) => Ok(formatted_price),
@@ -313,14 +372,15 @@ impl<'ye> CruelSummer{
         }
         return best_quote;    
     } 
-    
 
     pub fn get_quote(input_mint: &str, output_mint: &str, amount: u64) -> Result<JupiterQuote> {
-       // let amount: u64 = (amount * 10f64.powi(10)) as u64; // This is 1 SOL. 
         let quote_url = Self::generate_quote_link(input_mint, output_mint, amount);
         
-        let data: String = Runtime::new().unwrap().block_on(
-            Self::pull_via_https(&*quote_url)).unwrap();
+        let data: String = match Runtime::new().unwrap().block_on(
+            Self::pull_via_https(&*quote_url)){
+            Ok(d)  => d,
+            Err(e) => return Err(anyhow!("{}", e)),
+        };
         //println!("TRACE ---- {}", data);
         let quote: JupiterQuote = match serde_json::from_str(&data){
             Ok(q) => q,
@@ -335,11 +395,17 @@ impl<'ye> CruelSummer{
         let https_client = Client::builder().build::<_, hyper::Body>(https);
         let mut data = String::new();
         unsafe {
-            for i in 0..4{
-                let response = https_client.get(Uri::from_static(&*target_url))
-                .await.unwrap();
+            for _ in 0..4{
+                let response = match https_client.get(Uri::from_static(&*target_url))
+                .await{
+                    Ok(r) => r,
+                    Err(e) => return Err(anyhow!("{}", e)),
+                };
                 //println!("status: \n{}\n\n", response.status());
-                let buf = hyper::body::to_bytes(response).await.unwrap();
+                let buf = match hyper::body::to_bytes(response).await{
+                    Ok(b) => b,
+                    Err(e) => return Err(anyhow!("{}", e)),
+                };
                 data = String::from_utf8_lossy(&buf).into_owned();
                 if data.len() > 40 { break }; 
                 thread::sleep(Duration::from_secs(2));
@@ -348,14 +414,19 @@ impl<'ye> CruelSummer{
         return Ok(data);
     }
     
-    pub fn capture_2(user_creds: &UserCredentials, route: QuoteDataSequence, in_token: &Token) -> Result<()>{
-        if Self::token_account_balance(&RpcClient::new(RPC_SOLANA_LINK), &in_token).unwrap()
-            < route.quotes[0].inAmount + 200 { 
+    pub fn capture_v3(user_creds: &UserCredentials, route: QuoteDataSequence, in_token: &Token) -> Result<()>{
+        let in_token_balance = match Self::token_account_balance(&RpcClient::new(RPC_SERUM_LINK), &in_token){
+            Ok(b)  => b,
+            Err(e) => return Err(anyhow!("{}", e)),
+        };
+        if in_token_balance < route.quotes[0].inAmount{ 
                 show_statement(StatementType::LowBalance, "attempt cancelled");
                 return Err(anyhow!(""));
         }
-        let serialized_legs = Self::serialized_transactions(route.clone(), user_creds).unwrap();
+        let serialized_legs = Self::serialized_transactions(route.clone(), user_creds).unwrap();//{
+        
         for (a, serialized_transactions) in  serialized_legs.transactions.iter().enumerate(){
+    println!("TRACE --- serialized transactions: {}", serialized_transactions);
             let txs_b64: B64Transaction = match serde_json::from_str(&serialized_transactions){
                 Ok(t) => t,
                 _ => {
@@ -364,7 +435,13 @@ impl<'ye> CruelSummer{
             }};
             let txs: [Option<Transaction>; 3] = [
                 match txs_b64.setupTransaction {
-                    Some(t) => Some(Self::base64_to_transaction(t).unwrap()),
+                    Some(t) => {
+                        if a == 0 && route.quotes.len() > 1{ 
+                            show_statement(StatementType::ExcessRisk, "Starting leg includes a setup Tx. Attempt cancelled");
+                            return Err(anyhow!(""));
+                        };
+                        Some(Self::base64_to_transaction(t).unwrap())
+                    },
                     None => None,
                 },
                 Some(Self::base64_to_transaction(txs_b64.swapTransaction).unwrap()),
@@ -373,54 +450,139 @@ impl<'ye> CruelSummer{
                     None => None,
                 },
             ];  
-            let (std_wait, swap_wait) = (20, 30);
-            //let commitment_config = CommitmentConfig::confirmed();
+            let (std_wait, swap_wait) = (12, 14);
+            let commitment_config = CommitmentConfig::confirmed();
+            let tpu_config = TpuClientConfig{ fanout_slots: DEFAULT_FANOUT_SLOTS };
             let transaction_config = rpc_config::RpcSendTransactionConfig{
                 skip_preflight: true, preflight_commitment: None, encoding: None,
                 max_retries: None, min_context_slot: None,
             };
-            let alt_rpcs: [RpcClient; 4] = [
-                RpcClient::new(RPC_SSO_LINK),
-                RpcClient::new(RPC_SOLANA_LINK),
-                RpcClient::new(RPC_SERUM_LINK),
-                RpcClient::new(RPC_QUICKNODE_LINK),
-            ]; 
             for (b, tx) in txs.into_iter().enumerate(){
                 if tx.is_none() { continue };
-                let blockhash = match Self::get_valid_blockhash(&alt_rpcs[0]){
-                    Ok(h) => h,
-                    Err(e) => {
-                        let error_str = format!("Unable to fetch valid block hash, skipping opportunity. Error: {}", e);
-                        show_statement(StatementType::Error, &error_str);
-                        return Err(anyhow!("{}", e));
-                    },
-                };
-                let mut tx = tx.unwrap();
-                tx.message.recent_blockhash = blockhash;
-                tx.sign(&[&user_creds.keypair], blockhash); 
-                
-               let mut sigs: Vec<Signature> = Vec::new();
+                let mut sigs: Vec<Signature> = Vec::new();
                 let mut status: Vec<bool> = Vec::new();
-                for i in 0..2 {
-                        sigs.append(&mut alt_rpcs.iter().map(|rpc| rpc.send_transaction_with_config(&tx, transaction_config).unwrap()).collect::<Vec<Signature>>());
-                        let sigs_str = sigs.iter().map(|s| format!("\n\t{}", s)).collect::<Vec<String>>().join("");
-                        println!("{}", sigs_str);
-                        let wait_time = if b == 1 { swap_wait } else { std_wait };
-                        thread::sleep(Duration::from_secs(wait_time));
-                        status.append(&mut sigs.iter().map(|s| alt_rpcs[0].confirm_transaction(&s).unwrap() ).collect::<Vec<bool>>());
+
+                for _ in 0..1 {
+        /*  tpu 1/3: Uncomment for access to TPU clients. WSS links reqd. This is likely to be ineffective
+            when validators implement QUIC.
+                    let tpu_clients = [
+                        match TpuClient::new(
+                        Arc::new(RpcClient::new(RPC_SERUM_LINK)),
+                        RPC_QUICKNODE_WSS_LINK,
+                        tpu_config.clone(),
+                        ){
+                            Ok(t) => t,
+                            Err(_) => return Err(anyhow!("Failed to create TPU client")),
+                        }, 
+                        match TpuClient::new(
+                        Arc::new(RpcClient::new(RPC_SSO_LINK)),
+                        RPC_QUICKNODE_WSS_LINK,
+                        tpu_config.clone(),
+                        ){
+                            Ok(t) => t,
+                            Err(_) => return Err(anyhow!("Failed to create TPU client")),
+                        }, 
+                    ];
+            */
+                    // User should replace duplicate RPCs here. Will cause simple errors if deleted.
+                    let rpc_clients: [RpcClient; 4] = [
+                        RpcClient::new_with_commitment(RPC_SSO_LINK, commitment_config),
+                        RpcClient::new_with_commitment(RPC_SERUM_LINK, commitment_config),
+                        RpcClient::new_with_commitment(RPC_SERUM_LINK, commitment_config),
+                        RpcClient::new_with_commitment(RPC_SSO_LINK, commitment_config),
+                    ]; 
+                    let blockhash = match Self::get_valid_blockhash(&rpc_clients[0]){
+                        Ok(h) => h,
+                        Err(e) => {
+                            let error_str = format!("Unable to fetch valid block hash, skipping opportunity. Error: {}", e);
+                            show_statement(StatementType::Error, &error_str);
+                            return Err(anyhow!("{}", e));
+                        },
+                    };
+                    let mut tx = tx.clone().unwrap();
+                    tx.message.recent_blockhash = blockhash;
+                    tx.sign(&[&user_creds.keypair], blockhash); 
+                    
+                   // tpu 2/3: _ = tpu_clients.iter().map(|tpu| tpu.try_send_transaction(&tx)); // Send 2 txs to leader. 
+                    sigs.append(&mut rpc_clients.iter().map(|rpc| rpc.send_transaction_with_config(&tx, transaction_config).unwrap()).collect::<Vec<Signature>>()); // Send 4 txs to various RPCs.
+                    // tpu 3/3: let sigs: Vec<Signature> = alt_rpcs.iter().map(|rpc| rpc.send_and_confirm_transaction_with_spinner_and_config(&tx, commitment_config, transaction_config).unwrap()).collect(); 
+                    let sigs_str = sigs.iter().map(|s| format!("\n\t{}", s)).collect::<Vec<String>>().join("");
+                    println!("{} \n", sigs_str);
+                    let wait_time = if b == 1 { swap_wait } else { std_wait };
+                    thread::sleep(Duration::from_secs(wait_time));
+                    status.append(&mut sigs.iter().map(|s| rpc_clients[0].confirm_transaction(&s).unwrap() ).collect::<Vec<bool>>());
                 }
-                if &status[..] == [false; 12]{
+                let final_balance = match Self::token_account_balance(&RpcClient::new(RPC_SSO_LINK), &route.arb_path.path[a].1){
+                    Ok(b) => b,
+                    Err(e) => return Err(anyhow!("{}", e)),
+                }; 
+                if final_balance < route.quotes[0].outAmountWithSlippage || &status[..] == [false; 8]{ // Flaw here. Account could be emptied by another bot. ------------------------------------------------------ FIX!
                     let stmt = format!("{:<18} : Couldn't confirm tx, dropping attempt.", thread::current().name().unwrap_or("Unamed thread"));
                     show_statement(StatementType::Error, &stmt);
                     return Err(anyhow!(""));
                 }
                 show_statement(StatementType::Success, &format!("Transaction confirmed. Leg {}/{}, Tx {}/1-3", 
                     a+1, serialized_legs.transactions.len(), b+1));
-
         }}
         return Ok(());
     }
+    
+    /// Sends full token account balance if `amount = None`
+    pub fn send_from_token_to_usdc_account(config: &Config, user_creds: &UserCredentials, in_token: &Token, amount: Option<u64>)
+    -> Result<()>{
+        let stmt = format!("{:<18}: Attempting to recover last tx. Likely at a loss",
+            thread::current().name().unwrap_or("Unanmed thread"));
+        show_statement(StatementType::General, &stmt);
+        let rpc_client = RpcClient::new(RPC_SERUM_LINK);
+        let date_time = Utc::now();
+        let mut usdc_token: Option<Token> = None;
+        for token in &config.tokens{
+            if token.mint_key == USDC_MINT_KEY{ usdc_token = Some(token.clone()); }
+        }
+        if usdc_token.is_none(){
+            return Err(anyhow!("Couldn't derive usdc token")); 
+        }
+        let starting_account_balance = match Self::token_account_balance(&rpc_client, in_token){
+            Ok(b)  => b,
+            Err(e) => return Err(anyhow!("{}", e)),
+        };
+        if starting_account_balance == 0 {
+            show_statement(StatementType::Warning, "Attempt to recover from an account w/ a zero balance");  
+            return Ok(()); 
+        }
+        if amount.is_some() && starting_account_balance < amount.unwrap() {
+            show_statement(StatementType::Warning, "Attempt to recover from an account w/ a balance lower than requested amount");  
+            return Ok(()); 
+        }
+        let in_amount = amount.unwrap_or_else(|| starting_account_balance); 
+        let quote = match Self::get_quote(&in_token.mint_key, USDC_MINT_KEY, in_amount) {
+            Ok(q) => q,
+            _ => return Err(anyhow!("")),
+        };
+        let best_quote_data = Self::best_quote(&quote);
+        //let out_amount = best_quote_data.outAmountWithSlippage;
+        let arb_path = ArbPath{ path: vec![(in_token.clone(), usdc_token.unwrap())] };
+        let quote_data_sequence = QuoteDataSequence{ quotes: vec![best_quote_data], arb_path: arb_path.clone(), date_time};
+        match Self::capture_v3(user_creds, quote_data_sequence, in_token){
+            Ok(_)  => (),
+            Err(e) => return Err(anyhow!("{}", e)),
+        };
 
+        //balance recheck.
+        thread::sleep(Duration::from_secs(15));
+        let updated_balance = match Self::token_account_balance(&rpc_client, in_token){
+            Ok(b)  => b,
+            Err(e) => return Err(anyhow!("{}", e)),
+        };
+        if starting_account_balance - updated_balance >= in_amount{
+        println!("TRACE NEW RECOVERY -----------------------------------------------------  END RECOVERED");
+            return Ok(()); // Again not 100% reliable. Another bot may mod account.
+        }
+        println!("TRACE NEW RECOVERY -----------------------------------------------------  END RECOVERY FAILED");
+        return Err(anyhow!(""));
+    }
+
+    ///Deprecated. Use `send_from_token_to_usdc_account()`
     pub fn recover_last_tx(user_creds: &UserCredentials, quote: QuoteData, original_in_amount: u64)
     -> Result<()>{
         let stmt = format!("{:<18}: Attempting to recover last tx. Likely at a loss",
@@ -450,10 +612,17 @@ impl<'ye> CruelSummer{
             updtd_out_w_slip_amnt = (updtd_out_w_slip_amnt as f32 * (1f32 - out_decr_pct)) as u64;
             updated_quote.outAmountWithSlippage = updtd_out_w_slip_amnt;
             let serialized_transactions = Runtime::new().unwrap().block_on(
-                Self::pull_serialized_transaction_https(updated_quote.clone(), &user_creds)).unwrap(); 
+                Self::pull_serialized_transaction_https(updated_quote.clone(), &user_creds)); 
+            let serialized_transactions = match serialized_transactions {
+                Ok(s_t) => s_t,
+                Err(e) => return Err(anyhow!("{}", e)),
+            };
             let txs_b64: B64Transaction = match serde_json::from_str(&serialized_transactions){
                 Ok(f) => f,
-                Err(e) => return Err(anyhow!("{}", e)),
+                Err(e) => { 
+                    println!("{}", e);
+                    return Err(anyhow!("{}", e))
+                },
             };
 
             let txs_b64_arr = [
@@ -464,7 +633,11 @@ impl<'ye> CruelSummer{
             for (i, tx_b64) in txs_b64_arr.iter().enumerate(){
                 match tx_b64{
                     Some(tx) => {
-                        let mut tx = Self::base64_to_transaction(tx.clone()).unwrap();
+                        
+                        let mut tx = match Self::base64_to_transaction(tx.clone()){
+                            Ok(tx) => tx,
+                            Err(e) => return Err(anyhow!("{}", e)),
+                        };
                         let blockhash = match Self::get_valid_blockhash(&rpc_client){
                             Ok(b) => b,
                             _ => continue 'top_loop
@@ -503,7 +676,11 @@ impl<'ye> CruelSummer{
         let commitment_config = CommitmentConfig::confirmed();
 
         for _ in 0..15 {
-            let (blockhash, _ ) = rpc_client.get_latest_blockhash_with_commitment(commitment_config).unwrap(); 
+            //let (blockhash, _ ) = rpc_client.get_latest_blockhash_with_commitment(commitment_config).unwrap(); 
+            let (blockhash, _ ) = match rpc_client.get_latest_blockhash_with_commitment(commitment_config){
+                Ok(h) => h,
+                Err(e) => return Err(anyhow!("{}", e)),
+            }; 
             if rpc_client.is_blockhash_valid(&blockhash, commitment_config).unwrap(){
                 println!("Valid blockhash found: {}", blockhash);
                 return Ok(blockhash);
@@ -515,7 +692,7 @@ impl<'ye> CruelSummer{
 	pub fn base64_to_transaction(base64_transaction: String) -> Result<Transaction> {
         bincode::deserialize(&base64::decode(base64_transaction)?).map_err(|err| err.into())
     }
-
+    // Below needs to be more async. FIX!
     pub fn serialized_transactions(route: QuoteDataSequence, user_credentials: &UserCredentials) -> Result<SerializedTransactions>{ 
         let mut transactions = Vec::<String>::new();
         let mut date_time: Option<DateTime<Utc>> = None;
@@ -523,10 +700,13 @@ impl<'ye> CruelSummer{
             if date_time.is_none(){
                 date_time = Some(Utc::now()); 
             }
-            let serialized_transaction = Runtime::new().unwrap().block_on(
-            Self::pull_serialized_transaction_https(quote.clone(), &user_credentials)).unwrap();
-            transactions.push(serialized_transaction) 
+            let serialized_transaction = match Runtime::new().unwrap().block_on(
+            Self::pull_serialized_transaction_https(quote.clone(), &user_credentials)){
+                Ok(t) => t,
+                Err(e) => return Err(anyhow!("{}", e)),
+            };
             
+            transactions.push(serialized_transaction) 
         }
         return Ok(SerializedTransactions{ transactions, date_time: date_time.unwrap() });
     }
@@ -543,22 +723,27 @@ impl<'ye> CruelSummer{
             Ok(f) => f,
             Err(e) => return Err(anyhow!("{}", e)),
         };
-
         let https = HttpsConnector::new();
         let https_client = Client::builder().build::<_, hyper::Body>(https);
         let mut req = Request::builder().method(Method::POST).uri(INSTRUCTION_LINK).body(Body::from(serialized_form))
             .expect("request builder");
         // Post request will fail without header.
         req.headers_mut().insert(header::CONTENT_TYPE, header::HeaderValue::from_static("application/json"));
-        let response = https_client.request(req).await.unwrap();
+        let response = match https_client.request(req).await{
+            Ok(r) => r,
+            Err(e) => return Err(anyhow!("{}", e)),
+        };
         //println!("status: \n{}\n\n", response.status());
-        let buf = hyper::body::to_bytes(response).await.unwrap();
+        let buf = match hyper::body::to_bytes(response).await{
+            Ok(b) => b,
+            Err(e) => return Err(anyhow!("{}", e)),
+        };
         let buf_str = String::from_utf8_lossy(&buf).into_owned();
         return Ok(buf_str);
     }
 
     pub fn generate_quote_link(input_mint: &str, output_mint: &str, amount: u64) -> String {
-        let link = format!("https://quote-api.jup.ag/v1/quote?inputMint={}&outputMint={}&amount={}&slippage=0.09&feeBps=4", 
+        let link = format!("https://quote-api.jup.ag/v1/quote?inputMint={}&outputMint={}&amount={}&slippage=0.07&feeBps=4", 
                        input_mint, output_mint, amount);
         return link;
     }
@@ -567,12 +752,13 @@ impl<'ye> CruelSummer{
     pub fn load_config() -> Result<Config>{
         let mut config_file = OpenOptions::new().read(true).open(CONFIG_FILE_PATH).unwrap();
         let mut buf_reader = BufReader::new(config_file);
-        let mut content = String::new();
-        buf_reader.read_to_string(&mut content);
-        let config: Config = toml::de::from_str(&content).unwrap();
+        let mut content_buf = Vec::with_capacity(MAXIMUM_FILE_LEN);
+        buf_reader.read_to_end(&mut content_buf);
+        let config: Config = toml::de::from_str(&String::from_utf8(content_buf).unwrap()).unwrap();
         return Ok(config);
     }
    
+    //Stopped dev early here. There are better ways to do this. Highly recc modifying.
     #[inline(always)]
     pub fn load_arb_paths(tokens: &[Token], arb_options: &ArbOptions) -> Result<Vec<ArbPath>>{ 
         let mut arb_paths = Vec::<ArbPath>::new();
@@ -596,6 +782,7 @@ impl<'ye> CruelSummer{
                             let ok_statement = format!("{} -> {} -> {}", left_token.symbol, center_token.symbol, 
                                 right_token.symbol);
                             show_statement(StatementType::General, &ok_statement);
+                                //println!("TRACE --- Not comparable");
                         },
                         ArbOptions::SelectedTwoLeg(arb_selection) => {
                         //println!("---------------LOADING ARB_SELECT");
@@ -612,12 +799,13 @@ impl<'ye> CruelSummer{
                                     // || right_token.symbol.to_lowercase() == r_s.to_lowercase()
                                     //|| right_token.mint_key == *r_s{
                                 
-                                if left_token.symbol.to_lowercase() == l_s.to_lowercase()  // <------------------------------------ Diagnosing a bug, lazy code for now.
+                                if left_token.symbol.to_lowercase() == l_s.to_lowercase()
                                     && center_token.symbol.to_lowercase() == c_s.to_lowercase()
                                     && right_token.symbol.to_lowercase() == r_s.to_lowercase()
                                     {    arb_paths.push(
                                             ArbPath{path: vec![(left_token.clone(), center_token.clone()), (center_token.clone(), right_token.clone())],
                                         }); 
+                        //println!("TRACE --- comparable");
                                         let ok_statement = format!("{} -> {} -> {}", left_token.symbol, center_token.symbol, 
                                            right_token.symbol);
                                         show_statement(StatementType::General, &ok_statement);
@@ -662,10 +850,13 @@ pub enum StatementType{
     Success,
     General,
     Warning,
+    LowWarning,
     LowBalance,
+    ExcessRisk,
     Error,
 }
 
+//fix these.
 pub fn show_statement(statement_type: StatementType, statement: &str){
     let prompt: colored::ColoredString = match statement_type {
         StatementType::Opportunity => "Opportunity Found: ".green().bold(),  
@@ -673,7 +864,9 @@ pub fn show_statement(statement_type: StatementType, statement: &str){
         StatementType::Success => "Success: ".green().bold(),  
         StatementType::General => "General: ".cyan().bold(),
         StatementType::Warning => "Warning: ".yellow().bold(),  
-        StatementType::LowBalance => "Warning: ".yellow(),  
+        StatementType::LowWarning => "Warning: ".yellow(),  
+        StatementType::LowBalance => "Low Balance: ".yellow(),  
+        StatementType::ExcessRisk => "Excessive Risk: ".yellow(),  
         StatementType::Error => "Error: ".red().bold(),
     };
     println!("{}: {}", prompt, statement);

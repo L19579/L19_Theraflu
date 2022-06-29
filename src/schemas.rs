@@ -74,6 +74,16 @@ impl Token{
         println!("symbol: {}, mint_key: {}", self.symbol, self.mint_key);
     }
 }
+impl fmt::Display for Token{
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result{
+        write!(f, "{}", self.mint_key)
+    }
+}
+
+pub trait PubkeyConversion{}
+impl PubkeyConversion for str{}
+impl PubkeyConversion for std::string::String{}
+impl PubkeyConversion for Token{}
 
 // ------------------------------------------------- Arbitrage
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -172,6 +182,7 @@ impl PriceCheck{
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct QuoteDataSequence{
     pub quotes: Vec<QuoteData>,
+    pub arb_path: ArbPath,
     pub date_time: DateTime<Utc>,
 }
 #[derive(Serialize, Deserialize, Clone, Debug)]
